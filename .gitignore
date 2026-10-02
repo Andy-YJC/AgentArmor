@@ -1,9 +1,24 @@
 .DS_Store
 __pycache__/
 *.py[cod]
-MASW/tests/results/*
-!MASW/tests/results/.gitkeep
 .env
+.env.*
+!.env.example
+.venv/
+.tools/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local execution output (checked-in research results remain versioned).
+*_audit.jsonl
+/07_runtime/
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+**/tmp_*.sqlite
 
 # LaTeX build artifacts
 *.aux
@@ -20,5 +35,3 @@ fonttest.*
 # Render/review scratch images
 tmp_pdf_render*/
 tmp_pdf_review*/
-multi_agent_shared_write_named/tmp_pdf_render*/
-multi_agent_shared_write_named/tmp_pdf_review*/

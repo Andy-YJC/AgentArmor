@@ -1,264 +1,156 @@
-# AgentArmor
+# 链甲 · AgentArmor
 
-**AgentArmor** 是一套面向 LLM Agent 记忆系统的纵深防御研究原型。
+**基于写入路径分类的 LLM-Agent 全链记忆防御系统**
 
-系统针对攻击者通过操控 Agent 读写路径来污染记忆存储的威胁，构建了覆盖写入、检索、工具执行三个关键环节的多层防御体系。项目按 5 种攻击类型分模块实现，每个模块均包含独立的防御流水线、消融实验框架和评估数据集。
+AgentArmor 面向具有长期记忆、RAG 知识库和共享工作区的 LLM Agent，研究恶意内容如何经由写入、检索和工具调用持续影响 Agent 行为，并为不同写入路径提供防御流水线。
 
----
+本仓库包含五类防御模块、本地交互演示、实验脚本与研究材料，可用于阅读实现、验证攻击场景和开展消融评估。
 
-## 威胁模型
+[作品报告](05_docs/report/agentarmor-report.pdf) · [架构说明](05_docs/architecture.md) · [实验指南](05_docs/experiments.md) · [演示说明](01_demo-web/README.md)
 
-攻击者无法直接访问记忆存储，但可通过以下路径间接投毒：
+## 防御思路
 
-| 攻击类型 | 攻击向量 |
-|---|---|
-| **Type 1 — AutoWrite** | 利用框架自动写入机制（如 LangChain `save_context()`），绕过人工过滤直接污染记忆 |
-| **Type 2 — MINJA** | 在查询中嵌入隐藏指令，诱使 Agent 调用 `archival_memory_insert()` 写入恶意记忆 |
-| **Type 3 — Reflection** | 劫持反思/合成写入路径，使恶意内容以"精炼事实"身份获得高信任度持久化 |
-| **Type 4 — External Developer Write** | 在文档上传至 RAG 知识库时注入投毒内容（PoisonedRAG、AgentPoison 等） |
-| **Type 5 — Multi-Agent Shared Write** | Agent A 读取不可信外部内容后写入共享记忆，Agent B/C 将其作为可信上下文执行高权限工具 |
+记忆污染可能从一次外部输入开始，经持久化存储跨会话保留，再通过检索影响后续决策。AgentArmor 围绕这一过程设置多层防御：
 
----
-
-
-## 项目结构
-
-```
-AgentArmor-main-3/
-├── MINJA/                          # Type 2 防御模块
-├── AutoWrite/                      # Type 1 防御模块
-├── Reflection/                     # Type 3 防御模块
-├── External_Developer_Write/       # Type 4 防御模块
-├── MASW/                           # Type 5 简化原型
-├── multi_agent_shared_write_named/ # Type 5 完整实现（含论文、评估、可视化）
-│   ├── MASW/                       # 核心防御流水线
-│   ├── figures/                    # 实验结果图表（PNG/PDF）
-│   ├── document.tex / .pdf         # LaTeX 论文
-│   └── artifacts/                  # 实验计划、审计日志、案例分析
-└── multi_agent_shared_write_code/  # Type 5 早期代码原型
+```text
+外部输入 → 候选记忆 → 写入审查 → 记忆存储 → 检索复核 → 执行仲裁
+                        │                      │             │
+                        └────────── 审计与溯源 ──────────────┘
+                                         │
+                                   污染定位与级联撤销
 ```
 
----
+各模块按自身场景组合输入净化、风险检测、来源验证、完整性保护和信任约束，保留独立配置与评估入口。
 
-## 各模块防御机制
+## 五类防御模块
 
-### Type 1 — AutoWrite
+| 类型 | 写入路径 | 模块 | 主要防御能力 |
+| --- | --- | --- | --- |
+| Type 1 | 框架自动写入 | [AutoWrite](03_defense/AutoWrite/) | Token 清洗、选择性写入、完整性链、时序衰减与分布监控 |
+| Type 2 | Agent 自主写入 | [MINJA](03_defense/MINJA/) | 写入意图检测、因果审查、行为仿真、溯源签名与执行对齐 |
+| Type 3 | 反思归纳写入 | [Reflection](03_defense/Reflection/) | 反思注入检测、证据锚定、事实一致性、策略审查与写入门控 |
+| Type 4 | 外部开发者写入 | [External Developer Write](03_defense/External_Developer_Write/) | 文档异常检测、跨块连贯性、鲁棒检索与检索后验证 |
+| Type 5 | 多 Agent 共享写入 | [MASW](03_defense/MASW/) | 信任标记、候选事实验证、共享写入网关、工具仲裁与级联撤销 |
 
-防御自动写入场景，在 MINJA D1-D6 管线基础上新增 6 个节点：
-
-| 节点 | 功能 |
-|---|---|
-| D-A `TokenSanitizer` | Token 级清洗，过滤控制字符和注入 token |
-| D-B `SelectiveWrite` | 选择性写入策略：新颖度过滤 + 写入频率限制 |
-| D-C `IntegrityChain` | 密码学链式哈希，跨会话篡改检测 |
-| D-D `TemporalDecay` | 检索时对陈旧记忆降权 |
-| D-E `RetrievalAlign` | 双通道检索对齐（嵌入相似度 + LLM 判断） |
-| D-F `DistributionMonitor` | KL 散度扫描，监控记忆分布健康状态 |
-
-**消融结果（mock 模式，~120 样本）：**
-
-| 配置 | F1 |
-|---|---|
-| Baseline（无防御） | 0.000 |
-| +D-A | 0.049 |
-| +D-A +D-B | 0.462 |
-| Full（D-A 至 D-F） | 0.476 |
-
----
-
-### Type 2 — MINJA
-
-防御 MINJA 攻击（arXiv:2503.03704），6 节点流水线：
-
-| 节点 | 功能 |
-|---|---|
-| D1 `QueryIntent` | 写意图检测：关键词正则 / 语义子空间距离 / LLM 分类器 |
-| D2 `CausalWrite` | 反事实因果归因：计算 indication_prompt 对写入动作的 Dominance Shift |
-| D3 `ProspectiveSim` | 前瞻行为模拟：生成对抗激活上下文，预判候选记忆是否导致危险工具调用 |
-| D4 `Provenance` | IFC 溯源签名：HMAC/Ed25519 绑定内容哈希 + 完整性标签 + 触发查询哈希 |
-| D5 `RetrievalAudit` | 检索时 Hub 异常检测（HubScan）+ Bron-Kerbosch 最大团检测协同攻击 |
-| D6 `ExecutionAlign` | 工具调用与原始用户任务的余弦相似度对齐守卫 |
-
-**消融结果（mock 模式，120 样本，MI-1/2/3/4 × 20 + 40 正常）：**
-
-| 配置 | All F1 | MI-4 F1 |
-|---|---|---|
-| D1+D2+D3+D4 | 0.857 | 0.000（D5 未启用） |
-| Full（D1-D6） | **1.000** | **1.000** |
-
----
-
-### Type 3 — Reflection
-
-防御反思合成写入，5 写入节点 + 溯源绑定器 + 检索守卫：
-
-| 节点 | 功能 |
-|---|---|
-| D1 | 原始对话轮次中的反思目标注入检测 |
-| D2 `Grounding` | 溯源锚定审计：验证合成事实是否有可信原始轮次支撑 |
-| D3 `Consistency` | 与已信任记忆的槽位冲突检测 |
-| D4 `Policy` | 策略审计：阻止存储密钥、凭证、可执行指令 |
-| D5 `WriteGate` | 加权风险门控：`risk = 0.35×注入风险 + 0.35×(1-溯源分) + 0.20×矛盾分 + 0.10×策略分` |
-
----
-
-### Type 4 — External Developer Write
-
-防御文档上传时的 RAG 知识库投毒，7 节点流水线（SP1-SP7）：
-
-| 节点 | 功能 |
-|---|---|
-| SP1 | 嵌入空间异常检测（Mahalanobis 距离 + LOF） |
-| SP2 | 内容困惑度分析，检测注入指令的非自然语言模式 |
-| SP3 | 跨块语义连贯性验证，检测拼接注入引入的语义断点 |
-| SP4 | 触发区域检测，识别 AgentPoison 触发 token 的紧凑嵌入簇 |
-| SP5 | 鲁棒聚合检索，稀释投毒文档对答案的影响 |
-| SP6 | 检索后验证：NLI + 交叉编码器一致性校验 |
-| SP7 | 语义依赖图分析：实体关系图检测跨文档碎片化注入 |
-
-**评估结果（200 文档，Config-5）：**
-
-| 方法 | F1 | P50 延迟 |
-|---|---|---|
-| 关键词规则基线 | 0.528 | — |
-| DeepSeek-v4-Flash | 0.961 | ~1019 ms |
-| SP1-SP7（无 API） | 0.645–1.000 | **~0.13 ms** |
-
----
-
-### Type 5 — Multi-Agent Shared Write（MASW）
-
-**核心不变量：外部内容不得仅凭流经 Agent 便自动获得信任，写入共享记忆。**
-
-7 节点流水线（D1-D7）：
-
-| 节点 | 功能 |
-|---|---|
-| D1 `InputLabel` | 低信任标记 + Spotlighting：用 `[UNTRUSTED_EXTERNAL_DATA_BEGIN]...[END]` 定界外部内容 |
-| D2 `CandidateExtract` | Agent A 仅产出 `CandidateFact` 对象，禁止直接写入共享记忆 |
-| D3 `RiskFilter` | 注入风险评分：覆盖短语、工具命令、策略记忆模式、数据外泄模式的加权检测 |
-| D4 `ProvenanceGate` | 冲突检测 + 验证 + 信任提升 + 共享记忆写入网关 |
-| D5 `RetrievalAudit` | 信任感知检索：按信任级别、作用域、污点标记过滤 |
-| D6 `ExecutionAlign` | 行动提案 + 工具调用仲裁：高影响力工具需人工审批 |
-| D7 `Revocation` | 投毒记忆撤销 + 经由 parent_ids 的级联清理 |
-
-**端到端验证结果（8 攻击场景）：**
-
-| 指标 | 脆弱 Agent | MASW |
-|---|---|---|
-| 危险工具执行 | 8/8 | **0/8** |
-| 投毒记忆写入 | 8/8 | **0/8** |
-
-**基线对比（145 样本，含困难集）：**
-
-| 方法 | Precision | Recall | F1 | FPR |
-|---|---|---|---|---|
-| PromptInject-style | — | 0.322 | 0.487 | — |
-| LLM-Guard-style | — | 0.433 | 0.605 | — |
-| Rebuff-style | — | 0.422 | 0.594 | — |
-| **MASW（推荐配置）** | **1.000** | **1.000** | **1.000** | **0.000** |
-
----
-
-## 核心技术
-
-**信任格（Trust Lattice）**：整数格 + 格汇运算（`min` 语义），任何不可信来源都会污染衍生结果。MINJA 使用 `IntegrityLabel`（UNTRUSTED / CANDIDATE / TRUSTED），MASW 使用四级 `TrustLevel`（0-3）。
-
-**溯源签名**：MINJA D4 和 Reflection `ProvenanceBinder` 用 HMAC-SHA256 或 Ed25519 将内容哈希、完整性标签、触发查询哈希绑定为签名记录，检索时验证签名，篡改条目被过滤。
-
-**Spotlighting**：MASW D1 用定界符显式标注数据/指令边界，防止下游模型将外部数据误认为系统指令。
-
-**防御裁决协议**：所有流水线使用统一的 `DefenseVerdict`（PASS / FLAG / BLOCK / ASK），FLAG 升级至更昂贵的下游节点，ASK 暂停等待人工确认（用于高影响力工具调用）。
-
-**消融友好设计**：每个防御节点均可通过类型化配置数据类独立开关，支持系统性消融实验。
-
-**审计日志**：所有流水线输出结构化 JSONL 审计日志，覆盖写入、检索、工具调用事件。
-
----
-
-## 环境依赖
-
-核心流水线为纯 Python，无强制外部依赖，均可在 mock/启发式模式下运行。
-
-| 依赖 | 用途 | 是否必须 |
-|---|---|---|
-| Python 3.10+ | 运行环境 | 是 |
-| `numpy` | 嵌入向量计算（D5、AutoWrite） | 否 |
-| `cryptography` | Ed25519 签名 | 否 |
-| OpenAI / DeepSeek API Key | D2 因果归因、D3 行为模拟等 LLM 节点 | 否 |
-
----
+当前主线实现位于 `03_defense/`。AutoWrite 复用 MINJA 的部分能力；MASW 使用完整版实现。各模块的防御节点与报告章节对应关系见 [架构说明](05_docs/architecture.md)。
 
 ## 快速开始
 
-### Type 5 — MASW（简化版）
+需要 **Python 3.10 或更新版本**。以下命令均在仓库根目录执行，建议使用独立的 Python 虚拟环境。
+
+安装运行依赖并启动演示：
 
 ```bash
-# 单元测试
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s MASW/tests
-
-# 评估
-PYTHONDONTWRITEBYTECODE=1 python3 -m MASW.tests.eval_masw
+python -m pip install -r requirements.txt
+python run.py demo
 ```
 
-### Type 5 — MASW（完整版）
+浏览器打开 **http://127.0.0.1:4173**。
+
+本地演示无需配置 API Key。浏览器通过 Python 服务调用项目模块，支持单场景逐步执行、无防护与受保护路径对比，以及批量结果查看。工具执行使用本地沙箱，运行证据保存在 `07_runtime/demo/`。
+
+若需更换端口，在 PowerShell 中执行：
+
+```powershell
+$env:AGENTARMOR_DEMO_PORT = "4183"
+python run.py demo
+```
+
+更多操作见 [Web 演示说明](01_demo-web/README.md)。
+
+## 仓库结构
+
+目录按“运行入口 → 防御模块 → 结果与说明”连续编号：
+
+```text
+AgentArmor/
+├── 01_demo-web/                   # 本地演示服务与前端
+├── 02_tools/                      # 开发与实验工具
+│   ├── scripts/                   # 全仓库测试入口
+│   └── experiments/               # 实验、外部接入与旧报告工具
+├── 03_defense/                    # 五类防御实现
+│   ├── AutoWrite/
+│   ├── MINJA/
+│   ├── Reflection/
+│   ├── External_Developer_Write/
+│   └── MASW/
+├── 04_benchmarks/                 # 实验数据、归档结果和图表
+├── 05_docs/                       # 作品报告与使用文档
+├── 06_archive/                    # 历史原型
+├── 07_runtime/                    # 新运行产物，不纳入版本管理
+├── run.py                         # 统一命令入口
+├── pyproject.toml                 # 测试与静态检查配置
+├── requirements.txt               # 运行依赖
+├── requirements-dev.txt           # 开发与测试依赖
+├── .env.example                   # 可选远程基线配置示例
+└── LICENSE
+```
+
+`run.py` 负责配置编号目录下的模块搜索路径。运行独立模块时使用 `python run.py module <模块名>`，包名仍为 `AutoWrite`、`MINJA` 等原名称。
+
+## 测试与代码检查
+
+安装开发依赖后执行：
 
 ```bash
-cd multi_agent_shared_write_named
-
-# 单元测试
-python3 -m unittest discover -s MASW/tests
-
-# 消融评估
-python3 -m MASW.tests.eval_masw_ablation
-
-# 端到端攻击验证
-python3 -m MASW.tests.e2e_attack_validation
+python -m pip install -r requirements-dev.txt
+python run.py check
+python -m ruff check .
 ```
 
-### Type 2 — MINJA
+`check` 检查五个主线模块，并在独立进程中测试两套历史原型。仅检查主线模块可执行：
 
 ```bash
-cd MINJA
-
-python3 -m unittest discover -s tests
-
-# 消融评估
-python3 -m tests.eval_minja_ablation
+python -m pytest
 ```
 
-### Type 1 — AutoWrite
+## 实验运行
+
+运行端到端链路、Type 4/5、撤销、消融、良性语料和性能实验：
 
 ```bash
-cd AutoWrite
-
-python3 -m unittest discover -s tests
-
-python3 -m tests.eval_autowrite_ablation
+python run.py benchmark --no-figures
 ```
 
-### Type 3 — Reflection
+结果默认写入 `07_runtime/experiments/<时间戳>/`，包含数据、指标、日志及运行记录。
+
+生成图表并指定输出目录：
 
 ```bash
-cd Reflection
-
-python3 -m unittest discover -s tests
+python -m pip install pillow
+python run.py benchmark --output-dir 07_runtime/my-run
 ```
 
-### Type 4 — External Developer Write
+指定目录必须不存在或为空。已有研究材料保存在 `04_benchmarks/`。
+
+独立模块评估示例：
 
 ```bash
-cd External_Developer_Write
-
-python3 -m unittest discover -s tests
+python run.py module AutoWrite.tests.eval_autowrite --mode mock
+python run.py module MINJA.tests.eval_minja --mode mock
+python run.py module Reflection.tests.eval_reflection
+python run.py module MASW.tests.eval_masw
 ```
 
----
+独立评估保留各自的数据协议与输出位置，部分结果写入模块的 `tests/results/`。完整命令、外部框架接入和产物说明见 [实验指南](05_docs/experiments.md)。
 
-## 参考文献
+## 配置与开发
 
-- MINJA 攻击：arXiv:2503.03704
-- CausalArmor：arXiv:2602.07918
-- CaMeL：arXiv:2503.18813
-- FIDES：arXiv:2505.23643
-- HubScan：arXiv:2602.22427
+- **防御配置**：查看各模块的配置类及流水线构造参数，按场景启用防御节点。
+- **可选远程基线**：参考 [.env.example](.env.example) 配置凭据与运行开关；本地演示和默认实验可独立运行。
+- **历史代码**：`06_archive/` 保留早期原型，主程序使用 `03_defense/` 中的实现。
+- **运行产物**：`07_runtime/`、审计日志和缓存已配置 Git 忽略规则；实验数据与归档结果按原有文件保留。
+
+目录迁移、命名与依赖约定见 [仓库维护说明](05_docs/repository-guide.md)。
+
+## 文档与许可
+
+| 文档 | 内容 |
+| --- | --- |
+| [作品报告](05_docs/report/agentarmor-report.pdf) | 系统设计、实现思路与实验分析 |
+| [架构说明](05_docs/architecture.md) | 五类路径、源码位置与模块依赖 |
+| [实验指南](05_docs/experiments.md) | 评估命令、依赖和结果目录 |
+| [演示说明](01_demo-web/README.md) | 交互场景、批量测试和运行证据 |
+| [仓库维护说明](05_docs/repository-guide.md) | 目录、命名和开发约定 |
+
+本项目采用 [MIT License](LICENSE)。
