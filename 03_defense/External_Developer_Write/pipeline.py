@@ -185,6 +185,17 @@ class DefensePipeline:
         # 存储供后续检测使用
         self._sp1_clean_stats = clean_stats
 
+    def calibrate_sp1(
+        self, clean_validation: List[DocumentEmbedding],
+        false_alarm_rate: float = 0.05,
+    ) -> float:
+        """训练后用独立正常验证集显式校准SP1；不调用则保留既有阈值。"""
+        if "sp1" not in self._detectors or not hasattr(self, "_sp1_clean_stats"):
+            raise RuntimeError("请先 initialize() 并 train_sp1()")
+        return self._detectors["sp1"].calibrate(
+            clean_validation, self._sp1_clean_stats, false_alarm_rate
+        )
+
     def train_sp2(self, clean_docs: List[Document]) -> None:
         """训练 SP2 的 PPL 经验分布。
 

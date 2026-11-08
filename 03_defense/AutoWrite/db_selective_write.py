@@ -30,6 +30,8 @@ on_write_request() 中，D-A 净化之后、D1 意图检测之前。
 from __future__ import annotations
 
 from typing import Callable, Optional
+from dataclasses import asdict
+from .db_novelty_review import NoveltyReview
 
 import numpy as np
 
@@ -45,7 +47,7 @@ class MemoryIndex:
     """
     记忆库嵌入索引的最小只读接口。
 
-    D-B 仅需要两个操作：
+    D-B 的基础向量策略需要两个操作；语义复核还需 get_all_contents()：
       get_all_embeddings() → 现有条目的嵌入矩阵 (N, d)
       count()              → 现有条目数
 
@@ -60,6 +62,10 @@ class MemoryIndex:
     def count(self) -> int:
         """返回当前记忆库中的条目总数。"""
         raise NotImplementedError
+
+    def get_all_contents(self) -> Optional[list[str]]:
+        """Optional texts in exactly the same order as get_all_embeddings()."""
+        return None
 
 
 class MockMemoryIndex(MemoryIndex):
@@ -155,12 +161,14 @@ class DBSelectiveWritePolicy:
         embed_fn: EmbedFn,
         memory_index: MemoryIndex,
         d1_check_fn: Optional[Callable[[str], float]] = None,
+        novelty_check_fn: Optional[Callable[[str, list[str]], NoveltyReview]] = None,
     ):
         self.cfg = config
         self._embed_fn = embed_fn
         self._index = memory_index
         # d1_check_fn(content) → D1 风险得分 [0,1]，越小越危险
         self._d1_check = d1_check_fn
+        self._novelty_check = novelty_check_fn
         self._session_write_count = 0
 
     def check(self, entry: CandidateEntry, write_ctx: WriteContext) -> DefenseVerdict:
@@ -173,7 +181,7 @@ class DBSelectiveWritePolicy:
         2. 计算候选嵌入（如未预先计算）
         3. 簇密度检测（洪水特征）
         4. 计算 novelty / redundancy / risk
-        5. 综合打分 V(m) 并对比阈值
+        5. 有正文和模型时，对最近邻做语义新颖度复核；否则使用原阈值
 
         判决语义
         --------
@@ -249,6 +257,26 @@ class DBSelectiveWritePolicy:
             "tau_write": self.cfg.tau_write,
             "cluster_density": round(density, 4),
         }
+
+        if self._novelty_check is not None and len(existing_embs):
+            contents = self._index.get_all_contents()
+            if contents is not None:
+                if len(contents) != len(existing_embs):
+                    raise ValueError("Memory texts and embedding index are inconsistent")
+                vector = cand_emb / (np.linalg.norm(cand_emb) + 1e-10)
+                matrix = existing_embs / (np.linalg.norm(existing_embs, axis=1, keepdims=True) + 1e-10)
+                similarities = matrix @ vector
+                nearest = np.argsort(-similarities)[:self.cfg.novelty_top_k]
+                review = self._novelty_check(entry.content, [contents[int(i)] for i in nearest])
+                meta["semantic_novelty"] = asdict(review)
+                meta["novelty_reference_indices"] = [int(i) for i in nearest]
+                return DefenseVerdict(
+                    "D-B", passed=review.decision == "novel", score=round(value, 4),
+                    reason=review.reason, action="PASS" if review.decision == "novel" else "BLOCK", metadata=meta,
+                )
+
+        if self._novelty_check is not None and self._index.get_all_contents() is None:
+            meta["semantic_novelty_status"] = "unavailable_memory_texts"
 
         if value < self.cfg.tau_write:
             return DefenseVerdict(

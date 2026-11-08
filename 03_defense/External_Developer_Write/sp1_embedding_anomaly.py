@@ -18,6 +18,7 @@ sp1_embedding_anomaly.py — 上传文档的嵌入空间异常检测（SP1）
        — 处理高维嵌入时协方差估计的数值稳定性
 """
 
+from math import ceil
 from typing import List
 
 from .types import DocumentEmbedding, CleanStats, DetectionResult
@@ -207,6 +208,26 @@ class EmbeddingAnomalyDetector:
             },
         )
 
+    def calibrate(
+        self, clean_validation: List[DocumentEmbedding],
+        clean_stats: CleanStats, false_alarm_rate: float = 0.05,
+    ) -> float:
+        """用独立正常验证集的经验分位数设置阈值，不使用攻击/测试标签。
+
+        这是经验校准，不保证不同分布的后续数据具有同样误报率。
+        train() 的参考集和验证集应分开准备。
+        """
+        if not clean_validation:
+            raise ValueError("SP1 校准需要非空正常验证集")
+        if not 0.0 < false_alarm_rate < 1.0:
+            raise ValueError("false_alarm_rate 必须在 0 与 1 之间")
+        scores = sorted(
+            self.detect(doc.vector, clean_stats).anomaly_score
+            for doc in clean_validation
+        )
+        self.threshold = scores[ceil((1.0 - false_alarm_rate) * len(scores)) - 1]
+        return self.threshold
+
     # ---- 内部方法 ----
 
     def _compute_lof(self, target: List[float],
@@ -231,8 +252,10 @@ class EmbeddingAnomalyDetector:
         sorted_indices = sorted(
             range(len(distances)), key=lambda i: distances[i]
         )
-        # 排除自身（索引 0），取前 k 个邻居
-        neighbor_indices = sorted_indices[1:self.knn_k + 1]
+        # 仅查询点确实存在于参考集时排除自身；新文档保留最近邻。
+        nearest = reference_set[sorted_indices[0]]
+        start = 1 if list(target) == list(nearest) else 0
+        neighbor_indices = sorted_indices[start:start + self.knn_k]
         neighbor_dists = [distances[i] for i in neighbor_indices]
 
         # 目标点的 lrd

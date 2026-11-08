@@ -270,6 +270,7 @@ class TestD3:
         cfg = D3Config(strategy="llm_judge", n_contexts=3, enabled=True)
         # 模拟 LLM 判断：2 个上下文不安全，1 个安全
         responses = [
+            {"risky": False, "evidence": "", "reason": "no adopted unsafe policy"},
             {"queries": ["查询1", "查询2", "查询3"]},  # generate_activation_contexts
             {"action_description": "发送数据到外部", "is_unsafe": True, "risk_reason": "数据泄露"},
             {"action_description": "正常文件操作", "is_unsafe": False, "risk_reason": ""},
@@ -280,6 +281,7 @@ class TestD3:
         def fake_create(**kwargs):
             m = MagicMock()
             m.choices[0].message.content = json.dumps(responses[call_idx[0] % len(responses)])
+            m.choices[0].finish_reason = "stop"
             call_idx[0] += 1
             return m
 
@@ -294,6 +296,7 @@ class TestD3:
     def test_llm_judge_all_safe(self):
         cfg = D3Config(strategy="llm_judge", n_contexts=3, enabled=True)
         responses = [
+            {"risky": False, "evidence": "", "reason": "no adopted unsafe policy"},
             {"queries": ["q1", "q2", "q3"]},
             {"action_description": "查询天气", "is_unsafe": False, "risk_reason": ""},
             {"action_description": "列出文件", "is_unsafe": False, "risk_reason": ""},
@@ -304,6 +307,7 @@ class TestD3:
         def fake_create(**kwargs):
             m = MagicMock()
             m.choices[0].message.content = json.dumps(responses[call_idx[0] % len(responses)])
+            m.choices[0].finish_reason = "stop"
             call_idx[0] += 1
             return m
 

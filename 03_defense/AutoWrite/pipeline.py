@@ -45,6 +45,7 @@ from MINJA.types import SourceLabel, WriteContext
 from .config import AutoWriteConfig
 from .da_token_sanitizer import DAPreWriteSanitizer
 from .db_selective_write import DBSelectiveWritePolicy, MemoryIndex
+from .db_novelty_review import review_novelty
 from .dc_integrity_chain import DCStorageIntegrityChain
 from .dd_temporal_decay import DDTemporalDecayReranker
 from .de_retrieval_align import DERetrievalAlignmentVerifier
@@ -149,7 +150,11 @@ class AutoWriteDefensePipeline:
             config=config,
             minja=minja_pipeline,
             da=DAPreWriteSanitizer(config.da, embed_fn),
-            db=DBSelectiveWritePolicy(config.db, embed_fn, memory_index, d1_check_fn),
+            db=DBSelectiveWritePolicy(
+                config.db, embed_fn, memory_index, d1_check_fn,
+                (lambda content, memories: review_novelty(llm_client, minja_pipeline.cfg.d3.judge_model, content, memories))
+                if llm_client is not None else None,
+            ),
             dc=DCStorageIntegrityChain(config.dc),
             dd=DDTemporalDecayReranker(config.dd),
             de=DERetrievalAlignmentVerifier(config.de, embed_fn, llm_client),
@@ -214,11 +219,12 @@ class AutoWriteDefensePipeline:
             return base_result
 
         # ── D-C：绑定链哈希（写入成功后，不影响写入判决）────────────────────
+        previous_chain_hash = self.dc._head
         chain_hash = self.dc.bind_chain(entry)
         # 将 chain_hash 写入 entry 扩展字段（持久化层需一同存储）
         if hasattr(entry, "chain_hash"):
             entry.chain_hash = chain_hash       # type: ignore[attr-defined]
-            entry.prev_chain_hash = self.dc._head  # type: ignore[attr-defined]
+            entry.prev_chain_hash = previous_chain_hash  # type: ignore[attr-defined]
 
         # ── D-F：更新分布统计（异步更新，不阻塞返回值）──────────────────────
         self.df.update(entry)

@@ -1,0 +1,7 @@
+# Optional CPU/local-model evaluation dependencies (torch CPU installed separately).
+sentence-transformers==5.7.0
+transformers==4.57.6
+openai==3.46.0
+numpy>=1.24
+python-dotenv>=1
+cryptography>=43

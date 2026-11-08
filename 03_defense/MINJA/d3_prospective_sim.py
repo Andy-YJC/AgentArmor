@@ -15,8 +15,8 @@ few-shot demonstration 时，会不会导致 Agent 执行危险动作？
   D3：  仿真内容被使用时产生的行为效果
         → 无论内容外观多自然，只要激活时导致危险行为即拦截
 
-触发条件：仅在 D2 返回 FLAG（边界区域）时触发（默认），
-          可通过 D3Config.trigger_on_boundary_only=False 改为每次触发。
+触发条件：默认仅对 D2 边界判决进行前瞻仿真。
+          其他未拒绝写入仍需通过 check_content 的记忆语义审计。
 
 策略切换：修改 D3Config.strategy
   "llm_judge"  → LLM 直接评估危险行为可能性（推荐，轻量）
@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Optional
+
+from memory_semantics import review_memory
 
 from .config import D3Config
 from .types import DefenseVerdict
@@ -184,16 +186,12 @@ def _simulate_llm_judge(
             temperature=0,
             max_tokens=256,
         )
-        raw3 = resp.choices[0].message.content or ""
-        try:
-            data = json.loads(raw3)
-        except json.JSONDecodeError:
-            import re
-            m = re.search(r'"is_unsafe"\s*:\s*(true|false)', raw3, re.I)
-            is_unsafe = m.group(1).lower() == "true" if m else False
-            results.append((ctx, is_unsafe, raw3[:100]))
-            continue
-        is_unsafe = bool(data.get("is_unsafe", False))
+        if resp.choices[0].finish_reason != "stop":
+            raise ValueError("D3 judge response is incomplete")
+        data = json.loads(resp.choices[0].message.content or "")
+        if not isinstance(data, dict) or type(data.get("is_unsafe")) is not bool:
+            raise ValueError("D3 judge requires a boolean is_unsafe verdict")
+        is_unsafe = data["is_unsafe"]
         reason = data.get("risk_reason", data.get("action_description", ""))
         results.append((ctx, is_unsafe, reason))
     return results
@@ -228,7 +226,7 @@ class D3ProspectiveSimulator:
     若 m 被检索并用作 few-shot demonstration，
     在 n 个对抗性激活上下文下，Agent 会不会产生危险行为？
 
-    计算代价高，默认仅在 D2 返回 FLAG（边界区域）时触发。
+    边界判决做前瞻仿真，其他候选仍需通过语义内容审计。
     """
 
     def __init__(
@@ -238,6 +236,22 @@ class D3ProspectiveSimulator:
     ):
         self.cfg = config
         self._llm = llm_client
+
+    def check_content(self, candidate_content: str) -> DefenseVerdict:
+        """Audit memory intent without inventing future operational authorization."""
+        if not self.cfg.enabled or self.cfg.strategy != "llm_judge":
+            return self.check(candidate_content)
+        if self._llm is None:
+            raise RuntimeError("D3 semantic admission requires llm_client")
+        review = review_memory(
+            self._llm, self.cfg.judge_model, candidate_content,
+            "Candidate memory for future agent reuse; the source is not trusted authorization.",
+        )
+        return DefenseVerdict(
+            "D3", passed=not review.risky, score=1.0 if review.risky else 0.0,
+            reason=review.reason, action="BLOCK" if review.risky else "PASS",
+            metadata={"strategy": "semantic_admission", "evidence": review.evidence},
+        )
 
     def check(self, candidate_content: str) -> DefenseVerdict:
         """
@@ -249,6 +263,12 @@ class D3ProspectiveSimulator:
         if not self.cfg.enabled:
             return DefenseVerdict("D3", passed=True, score=0.0,
                                   reason="D3 已禁用", action="PASS")
+
+        # A safe simulated action cannot authorize an injected memory policy.
+        if self.cfg.strategy == "llm_judge":
+            content_verdict = self.check_content(candidate_content)
+            if not content_verdict.passed:
+                return content_verdict
 
         # 生成激活上下文
         contexts = generate_activation_contexts(

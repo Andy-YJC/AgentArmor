@@ -86,8 +86,7 @@ class SemanticDependencyGraphAnalyzer:
 
         for doc in doc_group:
             triples = self._extract_triples(doc)
-            for triple in triples:
-                all_triples.append((doc.doc_id, triple))
+            all_triples.extend(triples)
             # 统计该文档的唯一实体数
             entities = set()
             for _, t in triples:

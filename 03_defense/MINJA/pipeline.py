@@ -204,9 +204,12 @@ class MINJADefensePipeline:
             # D2 边界区域 → FLAG，升级 D3
             needs_d3 = (v2.action == "FLAG") and self.cfg.d3.enabled
 
-        # ── D3：前瞻仿真（仅边界区域触发，成本最高）─────────────────────────
-        if needs_d3 or (not self.cfg.d3.trigger_on_boundary_only and self.cfg.d3.enabled):
-            v3 = self.d3.check(write_ctx.candidate_content)
+        # ── D3：边界前瞻仿真 / 其他候选语义审计─────────────────────────
+        if self.cfg.d3.enabled:
+            if needs_d3 or not self.cfg.d3.trigger_on_boundary_only:
+                v3 = self.d3.check(entry.content)
+            else:
+                v3 = self.d3.check_content(entry.content)
             verdicts.append(v3)
 
             if v3.action == "BLOCK":
